@@ -1,6 +1,185 @@
 """
-Fix 9: Capacity analysis
+06_capacity_analysis.py
+====================
+Models the relationship between assets under management (AUM) and net
+risk-adjusted performance for the walk-forward LASSO long-short strategy.
+As AUM grows, market impact costs scale with the dollar value of each
+rebalancing trade, eventually eroding the gross Sharpe ratio to the point
+where the strategy is no longer attractive.  This script computes and plots
+that degradation curve and identifies the breakeven AUM — the capacity
+ceiling of the strategy.
+
 Generates: outputs/capacity_analysis.png
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Motivation
+----------
+Reported Sharpe ratios from backtests are gross of market impact — they
+assume trades execute at the closing price with no size effect.  In
+practice, larger orders move prices against the trader (market impact),
+increasing effective transaction costs above the fixed bps assumed in
+compute_metrics_with_costs().  A strategy that achieves Sharpe 1.5 at
+$10M AUM may deliver Sharpe 0.8 at $500M and Sharpe 0.0 at $2B, making
+capacity analysis essential for understanding the strategy's realistic
+commercial potential.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Market impact model — linear permanent impact
+----------------------------------------------
+The model used is a simplified linear permanent impact framework:
+
+    Impact cost per trade = γ · (trade_size / ADV)
+
+where:
+  γ   = 0.1     impact coefficient — fraction of ADV that causes one unit
+                of adverse price movement (a standard order-of-magnitude
+                assumption for liquid large-cap equity portfolios)
+  ADV = $5B     assumed average daily volume of the portfolio constituents
+                — calibrated to the Fama-French 25 size×value portfolios,
+                which span large- and mid-cap US equities
+
+Total annual impact cost as a fraction of AUM:
+    Annual impact drag = γ · (AUM · avg_turnover · 12) / ADV
+
+  AUM · avg_turnover       dollar value traded per month (one-way)
+  × 12                     annualized
+  / ADV                    fraction of daily volume consumed
+  × γ                      converts volume fraction to return drag
+
+This is a linear model in AUM — impact costs grow proportionally with
+strategy size.  The quadratic (square-root) impact model used in more
+sophisticated capacity analysis would predict faster degradation at large
+AUM; the linear model used here is conservative (optimistic) at large AUM.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Base performance inputs
+------------------------
+The gross strategy statistics are extracted from compute_metrics_with_costs
+with bps_cost=0 (zero fixed transaction costs) so that the only cost source
+in the capacity model is AUM-scaled market impact:
+
+  base_ann_ret   annualized gross return (Gross_Ann_Ret / 100 to decimal)
+  avg_turnover   mean monthly one-way portfolio turnover from the backtest
+  ann_vol        implied annualized volatility, back-calculated as
+                 base_ann_ret / Gross_Sharpe — this avoids recomputing
+                 the full return series and is exact given the Sharpe
+                 definition.
+
+These three statistics fully parametrize the capacity curve: the return
+degrades linearly with AUM while the volatility is assumed constant
+(impact costs are treated as a drag on returns, not as an additional
+source of return variance — a standard first-order approximation).
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Net Sharpe curve
+-----------------
+For each AUM level in a log-spaced grid from $1M to ~$3B (300 points):
+
+    net_return(AUM)  = base_ann_ret − γ · (AUM · avg_turnover · 12) / ADV
+    net_sharpe(AUM)  = net_return(AUM) / ann_vol
+
+The net Sharpe curve is monotonically decreasing in AUM — higher AUM means
+higher impact, lower net return, lower Sharpe.  The curve starts at the
+gross Sharpe (near-zero AUM, negligible impact) and crosses zero when
+net_return = 0 (impact cost equals gross alpha).
+
+Breakeven AUM is defined as the AUM where net_sharpe = 1.0 — the point
+at which the strategy's risk-adjusted return equals a commonly cited
+institutional minimum hurdle rate.  It is found by locating the grid point
+where |net_sharpe − 1.0| is minimized.
+
+Printed diagnostics:
+  Gross Sharpe            baseline before any impact costs
+  Monthly turnover        average one-way turnover from compute_metrics_with_costs
+  Net Sharpe at $10M      negligible impact (near-capacity floor)
+  Net Sharpe at $100M     small institutional fund size
+  Net Sharpe at $500M     mid-size fund
+  Net Sharpe at $1B       large fund
+  Breakeven AUM           capacity ceiling at the Sharpe=1.0 hurdle
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Output figure (outputs/capacity_analysis.png)
+----------------------------------------------
+Single panel, semi-log x-axis (AUM in $ millions):
+
+  Blue curve         net Sharpe vs AUM — the primary output
+  Gray dotted line   gross Sharpe (AUM-independent ceiling)
+  Red dashed line    Sharpe = 1.0 hurdle rate
+  Red dotted line    breakeven AUM vertical marker
+  Red shading        AUM region where net Sharpe < 1.0 (below hurdle)
+  Green shading      AUM region where net Sharpe ≥ 1.0 (above hurdle)
+  Annotations        exact net Sharpe values at $10M, $100M, $500M
+
+The semi-log x-axis is essential because the relevant AUM range spans
+three orders of magnitude ($1M to $3B); a linear axis would compress the
+small-AUM region where most of the interesting variation occurs.
+
+Title includes the breakeven AUM, γ, ADV, and turnover for full
+reproducibility — the chart is self-contained without needing to read the
+code to understand the model assumptions.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Interpretation in project context
+-----------------------------------
+The breakeven AUM quantifies the commercial viability of the LASSO
+long-short strategy.  A breakeven well above $100M suggests the strategy
+is scalable enough to be relevant to institutional allocators; a breakeven
+below $50M suggests it is primarily a research result with limited
+real-world deployability.
+
+The turnover input (avg_turnover from compute_metrics_with_costs) directly
+links to the transaction cost analysis in backtesting.py — strategies with
+lower turnover have proportionally lower impact costs at any given AUM,
+pushing the breakeven higher.  The adaptive-lambda variant in
+walk_forward_backtest_adaptive may produce different turnover (higher
+regularization in volatile periods tends to reduce portfolio changes),
+and could be substituted to compare capacity across model variants.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Model assumptions and limitations
+-----------------------------------
+  Linear impact is optimistic at large AUM:
+    The square-root impact model (impact ∝ √(trade_size/ADV)) is more
+    empirically supported in the microstructure literature and predicts
+    faster Sharpe degradation.  The linear model underestimates impact
+    costs for AUM well above $500M, making the breakeven estimate
+    optimistic at large fund sizes.
+
+  ADV = $5B is a single-market assumption:
+    The Fama-French 25 portfolios are value-weighted and span the full
+    US equity market cap spectrum.  Small-cap portfolios (P1–P5) have
+    much lower ADV than large-cap portfolios; the $5B assumption is
+    appropriate for large-cap but overstates liquidity for small-cap
+    names, understating impact in those portfolios.
+
+  Constant volatility assumption:
+    ann_vol is treated as fixed regardless of AUM.  In practice, larger
+    positions are harder to exit during volatile markets, and impact costs
+    themselves introduce return variance.  This approximation is standard
+    but deteriorates at very large AUM where position unwinding becomes
+    a significant second-order effect.
+
+  γ = 0.1 is a single point estimate:
+    The impact coefficient varies by stock, time, and market conditions.
+    A sensitivity analysis varying γ over [0.05, 0.2] and ADV over
+    [$1B, $10B] would bound the uncertainty in the breakeven estimate
+    and is a natural extension of this single-scenario analysis.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Dependencies
+------------
+numpy, matplotlib, sys
+src.data_loader — load_all_data()
+src.backtest    — walk_forward_backtest(), compute_metrics_with_costs()
+src.solvers     — LassoProximal
 """
 import sys, numpy as np
 import matplotlib
