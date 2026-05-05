@@ -1,6 +1,210 @@
 """
-Novel Contribution 1b: Algorithm selection theory
+10_novelty_algorithm_theory.py
+======================================
+Theoretical and empirical analysis of algorithm selection for financial
+LASSO — Novel Contribution 1b.  Establishes a principled basis for
+choosing between PGD, FISTA, FISTA+restart, and BB LASSO as a function
+of the problem's condition number κ and regularization strength α.
+The central finding: BB LASSO consistently dominates at the condition
+numbers typical of financial factor data, while FISTA's theoretical
+O(1/t²) guarantee substantially underdelivers in practice due to the
+non-smooth L1 term destroying the strong convexity that the theory
+requires.
+
 Generates: outputs/novel_algorithm_theory.png
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Theoretical framework
+----------------------
+For a smooth strongly convex objective with Lipschitz constant L and
+strong convexity constant μ, the condition number κ = L/μ governs
+algorithm convergence rates:
+
+  PGD:            O(κ/t)    — requires κ times more iterations than
+                              an optimal method
+  FISTA:          O(√κ/t²)  — reduces the κ dependence to √κ, giving
+                              a theoretical speedup of √κ over PGD
+
+For LASSO specifically (smooth loss + non-smooth L1):
+  The L1 term is convex but not strongly convex — it contributes μ_L1 = 0
+  to the strong convexity constant.  The effective μ of the composite
+  LASSO objective is therefore min(μ_smooth, μ_L1) = 0, making the
+  problem only weakly convex.  FISTA's √κ speedup guarantee relies on
+  strong convexity (μ > 0); when μ = 0 the guarantee degrades and the
+  observed speedup can fall far below √κ, particularly at high α where
+  the non-smooth L1 term dominates.
+
+BB LASSO's adaptive step sizing estimates local curvature from secant
+pairs (s, g) rather than relying on the global L and μ bounds.  In the
+neighborhood of the sparse solution, BB effectively sees a higher local
+μ (the active-set restricted curvature) and takes correspondingly larger
+steps, giving it an empirical advantage that is not captured by the
+global √κ theory.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Constants from the Fama-French data
+-------------------------------------
+L  = 2·λ_max(XᵀX/n)   — smooth loss Lipschitz constant
+μ  = 2·λ_min(XᵀX/n)   — smooth loss strong convexity constant
+κ  = L/μ               — condition number of the smooth part of the
+                          LASSO objective
+
+Computed from the eigenvalues of the normalized Gram matrix of the
+standardized factor matrix.  With p = 6 standardized Fama-French factors,
+κ is printed at runtime; typical values are in the range 5–25 for this
+dataset, placing it in the regime where the script predicts BB should
+dominate FISTA.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Experiment 1 — Iterations vs. alpha on real data
+-------------------------------------------------
+Four solvers (PGD, FISTA, FISTA+fn restart, BB) are fitted on each of
+the 25 portfolio target series at 7 alpha values spanning [0.001, 0.1].
+All use max_iter=2000 and tol=1e-6.  Mean n_iter_ is recorded per alpha.
+
+This replicates and extends the novel1_fista_degradation.py experiment
+with two additions:
+  (a) FISTA+fn restart is included as a middle ground between vanilla
+      FISTA and BB — restart dampens oscillations but does not provide
+      the curvature adaptivity of BB.
+  (b) Speedup ratios (pgd/method) are computed at each alpha, making
+      the crossover point where FISTA drops below PGD directly visible.
+
+Key printed diagnostics:
+  FISTA and BB speedup at α = 0.003 (the CV-optimal value).
+  Boolean confirming whether BB wins at every alpha level tested.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Experiment 2 — Synthetic κ sweep
+----------------------------------
+To isolate the effect of condition number from the specific financial
+dataset, a controlled synthetic experiment is constructed for
+κ ∈ {2, 5, 10, 20, 50, 100}.
+
+For each κ:
+  1. A (p=20)-dimensional covariance matrix Σ is constructed with
+     eigenvalues linearly spaced from 1.0 to κ, rotated by a random
+     orthogonal matrix Q (from QR decomposition of a random Gaussian
+     matrix) to avoid axis-aligned structure.
+  2. X is drawn as n=200 rows from N(0, Σ) and column-standardized.
+  3. A sparse true coefficient vector β★ has 5 non-zero entries
+     (0.5, −0.4, 0.3, −0.2, 0.1); y = Xβ★ + 0.1·ε.
+  4. All three solvers are fitted at α = 0.01 with max_iter=5000.
+
+By construction, the condition number of XᵀX/n increases with κ,
+allowing direct comparison of observed vs. theoretical √κ speedup
+across a controlled range.  The Fama-French κ is overlaid on the
+resulting plot as a vertical reference line.
+
+Printed output per κ:
+  PGD, FISTA, BB iteration counts; FISTA actual vs. theoretical √κ
+  speedup; BB actual speedup.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Output figure — 2×3 grid (outputs/novel_algorithm_theory.png)
+--------------------------------------------------------------
+Panel (0,0) — Iterations vs. alpha (real data, log-x scale):
+  All four solvers plotted against alpha on a log scale.  Shows BB
+  consistently below all others at every alpha level, and FISTA
+  eventually crossing above PGD at high alpha.
+
+Panel (0,1) — Sparsity vs. alpha:
+  Mean number of active factors in the PGD solution at each alpha,
+  with the CV-optimal α = 0.003 marked.  Contextualizes the iteration
+  results — at low alpha the solution is dense (all 6 factors), at high
+  alpha it collapses to 0–1 active factors.
+
+Panel (0,2) — Speedup vs. κ (synthetic experiment):
+  FISTA actual speedup, BB actual speedup, and the theoretical √κ
+  benchmark plotted against κ.  FISTA tracks the √κ curve at low κ
+  but falls below at high κ; BB exceeds the theoretical curve at all
+  κ levels shown.  The Fama-French κ is marked as a dotted vertical
+  line, showing where the real data sits on this curve.
+
+Panel (1,0) — Speedup vs. alpha (real data):
+  Speedup ratios (pgd/method) for FISTA, FISTA+fn, and BB plotted
+  against alpha on a log scale.  The horizontal line at 1.0 marks the
+  PGD baseline; crossings below it indicate FISTA is slower than PGD.
+  The CV-optimal α = 0.003 is marked.
+
+Panel (1,1) — Theory summary: BB dominance region:
+  Theoretical FISTA speedup curve √κ with a shaded band representing
+  the empirically observed BB speedup range.  The region where BB's
+  shaded band is above the √κ curve identifies κ values where BB
+  empirically outperforms FISTA's theoretical guarantee.  The
+  Fama-French κ marker shows the real problem falls in BB's favor.
+
+Panel (1,2) — Findings summary (text panel):
+  Monospace-formatted summary box with:
+    FF data κ and the gap between FISTA's theoretical and observed speedup.
+    BB's actual speedup and the statement that it exceeds theory.
+    Mechanistic explanation: μ_LASSO = 0 destroys FISTA's guarantee.
+    Practical algorithm selection rule:
+      κ < 10  → BB LASSO
+      κ > 50  → FISTA acceptable
+      Finance → BB wins (κ typically in low-to-mid range)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Practical algorithm selection rule (summary)
+---------------------------------------------
+The combined evidence from both experiments supports a data-driven
+selection rule based on κ:
+
+  κ < 10 (low condition number, typical of small-p financial models):
+    BB LASSO dominates.  Adaptive curvature estimation extracts more
+    signal per iteration than FISTA's momentum; the overhead of tracking
+    secant pairs is negligible at small p.
+
+  κ > 50 (high condition number, typical of ill-conditioned large-p
+  problems or highly correlated factor matrices):
+    FISTA's √κ speedup begins to materialize, and the gap between FISTA
+    and BB narrows or reverses.  FISTA+restart is competitive in this
+    regime.
+
+  Financial factor models (κ typically 5–25):
+    BB consistently wins.  The practical recommendation for LASSO on
+    Fama-French-style data is to use BB as the default solver and
+    reserve FISTA for high-κ or high-p settings.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Limitations
+-----------
+  Synthetic experiment randomness:
+    The synthetic κ sweep uses np.random.seed(42) for reproducibility,
+    but results depend on the single random orthogonal matrix Q and
+    single noise draw per κ level.  Averaging over multiple seeds would
+    give more reliable speedup estimates at each κ, particularly for
+    the noisy BB speedup curve.
+
+  BB range shading in Panel (1,1) is approximate:
+    The shaded region uses fixed multipliers (0.3κ to 0.5κ) as a
+    stylized representation of the empirically observed BB speedup range
+    rather than the actual synthetic experiment output.  The shading
+    should be replaced with the actual min/max BB speedup values from
+    the synthetic κ sweep for a rigorous plot.
+
+  μ_LASSO = 0 argument:
+    The claim that the L1 term sets μ_LASSO = 0 is correct for the
+    global strong convexity constant.  However, on the active set
+    (coordinates with β_j ≠ 0), the restricted problem is smooth and
+    strongly convex.  FISTA's actual performance is therefore better
+    than the μ = 0 worst case suggests — the gap between theory and
+    observation is real but the μ = 0 argument slightly overstates it.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Dependencies
+------------
+numpy, matplotlib, matplotlib.gridspec, sys
+src.data_loader — load_all_data()
+src.solvers     — LassoProximal, FISTALasso, FISTARestart, BBLasso
 """
 import sys, numpy as np
 import matplotlib
