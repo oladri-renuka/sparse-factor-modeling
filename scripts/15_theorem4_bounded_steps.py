@@ -1,5 +1,5 @@
 """
-theorem4_bb_step_bounds.py
+15_theorem4_bounded_steps.py
 ==========================
 Empirical verification of Theorem 4: Barzilai-Borwein step sizes for the
 LASSO proximal operator are bounded between 1/L and 1/μ whenever the
