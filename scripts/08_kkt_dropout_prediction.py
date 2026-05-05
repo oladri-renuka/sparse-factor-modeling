@@ -1,6 +1,193 @@
 """
-Novel Contribution 2: KKT-based factor dropout prediction
+08_kkt_dropout_prediction.py
+=============================
+Full implementation and evaluation of Novel Contribution 2: using the KKT
+optimality conditions of the LASSO problem to predict, without running the
+solver, which factors will be zeroed out at a given α.  The partial
+correlation structure of X — encoded in the precision matrix C⁻¹ — provides
+a closed-form factor importance score that predicts LASSO dropout order and,
+with a calibrated threshold, predicts the exact active set.
+
 Generates: outputs/dropout_prediction.png
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Theoretical basis — KKT zero prediction
+-----------------------------------------
+At the LASSO optimum β★, the KKT stationarity condition for a zeroed
+coordinate j (β_j★ = 0) is:
+
+    |(2/n) Xⱼᵀ(y − Xβ★)| ≤ α
+
+When β★ is approximately zero (light regularization relative to the data
+signal), the residual y − Xβ★ ≈ y − Xβ_OLS and the condition simplifies
+to a statement about the partial correlation of feature j with y after
+removing shared factor variation.  Specifically, the partial correlation
+score for feature j on portfolio k is:
+
+    pc_jk = [C⁻¹ · c_k]_j
+
+where C = corr(X) is the p×p factor correlation matrix (precision matrix
+of the standardized factors) and c_k = [corr(X_j, y_k)]_{j=1..p} is the
+vector of raw factor-target correlations.
+
+KKT zero prediction rule:
+  Feature j is predicted to be zeroed (inactive) for portfolio k if:
+
+    |pc_jk| < τ · α · √n / n
+
+  where τ is a calibrated threshold.  The α·√n/n scaling makes the
+  threshold proportional to the regularization strength and inversely
+  proportional to √n (tighter predictions with more data).
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Threshold calibration — train/test split
+-----------------------------------------
+The threshold τ controls the sensitivity/specificity trade-off:
+  Large τ  → predicts more zeros (high recall for inactive factors,
+             but more false alarms for active factors)
+  Small τ  → predicts fewer zeros (conservative, misses some inactive
+             factors but avoids false active-set exclusions)
+
+Calibration procedure:
+  200 candidate τ values are evaluated over [0.05, 3.0] using portfolios
+  P1–P15 as the training set.  For each τ, the predicted zero set is
+  compared against the actual LASSO zero set (|β_j| ≤ 1e-4) for each
+  portfolio.  The τ maximizing the count of portfolios where the
+  predicted set exactly matches the actual set is selected.
+
+  Exact set match criterion: pred == act (both the predicted zero set
+  and the actual zero set must be identical — no partial credit).  This
+  is a strict criterion: a single wrong prediction for any factor flips
+  a portfolio from correct to incorrect.
+
+Out-of-sample validation:
+  The selected τ is then applied to portfolios P16–P25 (held-out test set)
+  without any further tuning.  Test accuracy is printed per portfolio with
+  ✓/✗ indicators and the predicted vs. actual zero sets shown explicitly.
+
+Train/test split rationale:
+  The 15/10 split (60% train / 40% test) is conservative given only 25
+  portfolios total.  A leave-one-out cross-validation would give a more
+  stable τ estimate; the current split is chosen for simplicity and to
+  give a meaningful held-out test set size.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Full evaluation — 25 × 6 prediction matrix
+--------------------------------------------
+After threshold calibration, predictions are generated for all 25
+portfolios × 6 factors, producing:
+
+  pred_matrix   (25 × 6)  binary: 1 = predicted active, 0 = predicted zero
+  actual_matrix (25 × 6)  binary: 1 = actually active,  0 = actually zero
+  diff matrix   (25 × 6)  pred − actual:
+                           0  = correct prediction (TP or TN)
+                          +1  = false alarm (predicted active, actually zero)
+                          −1  = miss (predicted zero, actually active)
+
+Per-factor confusion matrix counts (TP, TN, FP, FN) accumulated over all
+25 portfolios provide factor-level accuracy.  Overall accuracy is the
+fraction of all 150 (portfolio × factor) cells predicted correctly.
+
+Printed diagnostics:
+  Overall accuracy as a fraction and percentage (target: > 85%).
+  Per-factor accuracy percentage — identifies which factors are
+  systematically harder to predict (low accuracy) and which are
+  reliably predicted (high accuracy).
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Output figure — three-panel layout (outputs/dropout_prediction.png)
+--------------------------------------------------------------------
+Panel 1 — Per-factor prediction accuracy bar chart:
+  Six bars, one per factor, showing the percentage of portfolios (out of
+  25) for which that factor's active/zero status was correctly predicted.
+  Color coding: green ≥ 80%, orange ≥ 60%, red < 60%.  Reference lines at
+  60% and 80% mark qualitative accuracy thresholds.  Bar annotations show
+  exact percentage.  A factor near 100% is trivially predictable (always
+  active or always zero across portfolios); a factor near 50% is the
+  hardest to predict and contributes most to overall error.
+
+Panel 2 — Prediction error heatmap (25 portfolios × 6 factors):
+  Color-coded difference matrix (pred − actual).  Green cells (0) = correct
+  prediction; red cells (−1) = missed zeros (factor predicted active but
+  actually zeroed); yellow/green cells (+1) = false alarms (factor
+  predicted zero but actually active).  Annotated with numeric values for
+  exact reading.  Reveals systematic error patterns — e.g., if a specific
+  factor (column) is consistently mispredicted across many portfolios, or
+  if a specific portfolio (row) has many errors, suggesting the KKT
+  approximation is poor for that portfolio's data structure.
+
+Panel 3 — Partial correlation magnitude heatmap (25 × 6):
+  The raw |pc_jk| = |[C⁻¹c_k]_j| scores that drive the predictions.
+  Higher values indicate stronger unique predictive content for that
+  factor-portfolio pair.  The threshold τ·α·√n/n partitions each row
+  into predicted active (above threshold) and predicted zero (below).
+  This panel provides interpretability: readers can see which factors
+  have genuinely high partial correlations with which portfolios,
+  independent of the binary threshold decision.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Practical significance
+-----------------------
+A reliable KKT-based zero predictor has two direct applications:
+
+  1. Warm-start initialization:
+     Before running the solver, zero out predicted inactive coordinates.
+     This effectively solves a lower-dimensional problem from the start,
+     reducing iterations.  High prediction accuracy (> 85%) ensures the
+     warm start rarely excludes a truly active factor.
+
+  2. Interpretable factor screening:
+     The partial correlation score |C⁻¹c_k|_j provides a continuous
+     importance measure for each (factor, portfolio) pair that can be
+     computed in microseconds — useful for real-time factor relevance
+     monitoring without re-running the full LASSO path.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Limitations and caveats
+------------------------
+  Threshold overfitting risk:
+    τ is selected by exhaustive search over 200 candidates on 15 portfolios
+    with p = 6 features per portfolio (90 binary predictions).  The
+    optimization landscape is coarse — many τ values give identical training
+    accuracy — so the "best" τ may be one of many near-equivalent solutions.
+    Reporting training accuracy alongside test accuracy is essential to
+    distinguish genuine generalization from lucky threshold selection.
+
+  Full-sample look-ahead in C and c_k:
+    Both the precision matrix C⁻¹ and the factor-target correlations c_k
+    are computed from the full 2000–2023 sample.  In a strict no-look-ahead
+    setting, these should be recomputed from the training window at each
+    step of the rolling backtest.  The full-sample versions are used here
+    for the static threshold calibration only.
+
+  KKT approximation quality:
+    The derivation approximates y − Xβ★ ≈ y, dropping the fitted residual
+    term.  This approximation improves as α → ∞ (more regularization, β★
+    closer to zero) and deteriorates as α → 0 (dense solution, β★ far from
+    zero).  At the CV-optimal α = 0.003 the approximation quality is
+    moderate — accuracy results should be interpreted in this context.
+
+  p = 6 small-factor caveat:
+    With only 6 factors, the chance that a random binary predictor achieves
+    high exact set-match accuracy is non-trivial.  For p = 6, there are
+    only 2⁶ = 64 possible active sets, and the actual LASSO solutions at
+    α = 0.003 cluster around a small subset of them.  The prediction
+    accuracy should be compared to an informed baseline (e.g., always
+    predicting the most common active set) not just to 50% random guessing.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Dependencies
+------------
+numpy, matplotlib, seaborn, sys
+src.data_loader — load_all_data()
+src.solvers     — LassoProximal
 """
 import sys, numpy as np
 import matplotlib
