@@ -1,6 +1,197 @@
 """
-Fix 1: High-dimensional OAP experiment
+12_highdim_oap.py
+==============
+High-dimensional benchmarking experiment using the Open Asset Pricing (OAP)
+dataset — a real-world predictor panel with far more features than the
+six Fama-French factors used elsewhere in this project.  Tests whether the
+algorithm rankings established at p=6 hold up when p scales to hundreds of
+firm characteristics, and demonstrates LASSO's variable selection behavior
+in a genuinely high-dimensional setting.
+
 Generates: outputs/highdim_oap.png
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Data source — Open Asset Pricing (PredictorLSretWide.csv)
+----------------------------------------------------------
+The OAP dataset (Chen & Zimmermann, 2022) contains monthly long-short
+portfolio returns for a large cross-section of published return predictors
+(momentum variants, value signals, profitability measures, accruals, etc.).
+The wide format has one column per predictor and one row per month.
+
+Preprocessing steps:
+  1. Filter to post-2000 (year >= 2000) to match the Fama-French sample
+     window used in the rest of the project.
+  2. Drop any column with any NaN value (axis=1 dropna) — this is a strict
+     complete-case filter that retains only predictors with uninterrupted
+     monthly coverage across the entire post-2000 period.  The number of
+     surviving columns (p) depends on data availability and is printed at
+     runtime.
+  3. Construct X and y with a one-month forward shift:
+       X = rows 0…T-2  (predictor values at month t)
+       y = row-means of rows 1…T-1  (average cross-predictor return at t+1)
+     The y construction — averaging all predictor returns at t+1 — creates
+     a synthetic "consensus signal" target representing the mean return of
+     the full predictor universe, which LASSO then tries to decompose back
+     into a sparse linear combination of individual predictors.
+  4. Column-standardize X (zero mean, unit variance with 1e-8 epsilon
+     guard against zero-std columns).
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Alpha selection — α = 0.20
+----------------------------
+A higher alpha than the Fama-French experiments (where α = 0.003) is used
+because p is much larger.  At low alpha, LASSO would select hundreds of
+predictors in a p>>6 setting, defeating the sparsity demonstration.
+α = 0.20 is chosen to produce a manageable sparse solution (O(10–50)
+selected predictors out of p) that can be meaningfully displayed in the
+coefficient bar chart.  The Ridge comparison uses α = 0.1 independently
+set to a scale appropriate for dense L2 regularization at high p.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+CVXPY reference solution
+--------------------------
+lasso_cvxpy(X, y, alpha) is called once to provide a ground-truth
+coefficient vector.  Wall-clock time is printed to illustrate the cost
+of interior-point methods at high p — contrasting with the first-order
+solvers benchmarked below.  The reference solution is not directly used
+in the plots; the iterative solver outputs are the primary analysis
+objects.  If CVXPY times out or fails, the script continues since ref is
+not referenced after computation.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Algorithm benchmark — 5 timing repetitions
+--------------------------------------------
+Six methods are benchmarked:
+  LassoProximal       — proximal gradient descent (PGD baseline)
+  FISTALasso          — accelerated proximal gradient (vanilla)
+  FISTARestart        — FISTA with function-value restart
+  BBLasso             — Barzilai-Borwein adaptive step sizes
+  CoordinateDescent   — cyclic coordinate descent
+  RidgeScratch        — closed-form Ridge (α=0.1), for sparsity contrast
+
+All LASSO solvers use max_iter=3000 to allow convergence at high p where
+more iterations may be needed.  Ridge is passed no alpha or max_iter
+from the outer dict (its __init__ takes alpha only); the conditional
+in the solver instantiation handles this special case.
+
+Each solver is timed over 5 independent runs; mean wall-clock ms is
+reported.  The speedup ratio vs. PGD is computed as pgd_ms / method_ms
+(> 1.0 means faster than PGD).  Ridge is excluded from the speedup
+column ('—') since it solves a different objective.
+
+Printed table columns:
+  Method    solver name
+  Iters     n_iter_ (1 for Ridge closed-form; capped at max_iter if
+            non-convergence; n_iter_=0 fallback → displayed as 1)
+  ms        mean wall-clock milliseconds over 5 runs
+  Nonzero   number of coefficients with |β_j| > 1e-4
+  vs PGD    wall-clock speedup ratio relative to Proximal GD
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Sparsity analysis — top selected predictors
+--------------------------------------------
+After benchmarking, the PGD (LassoProximal) coefficient vector is used
+to identify selected predictors (|β_j| > 1e-4).  The top 10 by absolute
+coefficient magnitude are printed with their predictor names and signed
+coefficient values.  This answers the research question: given hundreds
+of candidate return predictors, which ones does LASSO identify as the
+most important components of the consensus signal?
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Output figure — three-panel layout (outputs/highdim_oap.png)
+-------------------------------------------------------------
+Panel 1 — Iteration and wall-clock comparison (bar chart):
+  Five LASSO solvers (Ridge excluded) shown side by side.
+  Bar height = iteration count; annotation above each bar shows
+  iterations and mean ms.  Highlights whether algorithm rankings from
+  the p=6 benchmark_timing.py experiment persist at high p.
+
+Panel 2 — Sparsity: LASSO vs. Ridge (bar chart):
+  Three bars: LASSO selected (non-zero), LASSO dropped (zero), Ridge
+  non-zero (always p, since Ridge never exactly zeros coefficients).
+  Visually demonstrates the core difference between L1 and L2
+  regularization in the high-dimensional setting — LASSO performs
+  automatic variable selection while Ridge retains all predictors.
+
+Panel 3 — Top LASSO-selected predictor coefficients (horizontal bar):
+  Up to 12 predictors with largest |β_j|, sorted by magnitude, with
+  green bars for positive coefficients and red for negative.  Provides
+  economic interpretability: which predictor long-short strategies have
+  the largest positive or negative weights in explaining the consensus
+  return signal.
+
+Figure title includes n and p at runtime so the plot is self-describing
+regardless of which rows/columns survived the completeness filter.
+Saved at 150 dpi to outputs/highdim_oap.png.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Key research questions answered
+---------------------------------
+  1. Do algorithm rankings generalize to high p?
+     If CoordinateDescent or BBLasso retain their p=6 advantages at
+     p >> 6, the benchmark conclusions are robust.  If rankings flip,
+     it suggests the p=6 results are specific to small problems.
+
+  2. How sparse is LASSO at α = 0.20 on real high-dimensional data?
+     The selected/dropped counts in Panel 2 quantify how aggressively
+     LASSO prunes the predictor space relative to Ridge's dense solution.
+
+  3. Which firm characteristics dominate?
+     The signed coefficient magnitudes in Panel 3 give a data-driven
+     answer to which published return predictors contain the most unique
+     information about future cross-sectional returns in the post-2000
+     sample.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Known limitations
+------------------
+  Synthetic target y:
+    Averaging all predictor returns to form y is a methodological
+    simplification — it creates a target that is by construction
+    correlated with every predictor column, making LASSO's selection task
+    easier than it would be for an independent return series.  Results
+    should be interpreted as a stress test of solver scalability rather
+    than a realistic return prediction exercise.
+
+  Complete-case filter:
+    Dropping all columns with any NaN is conservative and may
+    disproportionately remove newer or more specialized predictors,
+    biasing the surviving panel toward well-established, long-history
+    signals.
+
+  Ridge instantiation workaround:
+    The conditional kwargs construction for Ridge (`if not
+    name.startswith('Ridge')`) is fragile — it would silently pass
+    wrong arguments if a non-Ridge solver happened to be named
+    'Ridge...' or if Ridge's __init__ signature changed.  A cleaner
+    approach would be separate method specs for Ridge vs. LASSO solvers.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Dependencies
+------------
+numpy, pandas, matplotlib, time, sys
+src.solvers      — LassoProximal, FISTALasso, FISTARestart, BBLasso,
+                   CoordinateDescent, RidgeScratch
+src.cvxpy_solvers — lasso_cvxpy
+
+Input file
+----------
+data/PredictorLSretWide.csv — Open Asset Pricing wide-format predictor
+                               return panel (Chen & Zimmermann, 2022)
+
+Reference
+---------
+Chen, A. Y. & Zimmermann, T. (2022). Open Source Cross-Sectional Asset
+Pricing. Critical Finance Review, 11(2), 207–264.
 """
 import sys, numpy as np, pandas as pd, time
 import matplotlib
